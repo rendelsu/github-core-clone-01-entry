@@ -259,37 +259,50 @@ export class Store {
 
   /**
    * The commits reachable from `roots` at each distance (0 = the roots), with no
-   * depth limit. Used for shallow-boundary bookkeeping.
+   * depth limit. Used for shallow-boundary bookkeeping. `maxDist` caps the walk:
+   * only entries at distance <= maxDist are recorded. The shallow-boundary code
+   * only ever reads entries at distance depth-1 or below, so a fetch with a
+   * finite depth does not need the whole history walked. A merge commit inside
+   * the walked region makes first-discovery distances order-dependent past the
+   * cutoff, so in that case the full walk is run instead (exact either way).
    */
-  commitDistances(repo: Repo, roots: Iterable<string>): Map<string, number> {
-    const dist = new Map<string, number>();
-    const queue: string[] = [];
-    for (const root of roots) {
-      if (!G.isOid(root) || dist.has(root)) continue;
-      const object = repo.objects.get(root);
-      if (object === undefined) continue;
-      if (object.type === 'tag') {
-        const tag = G.parseTag(object.data);
-        if (!dist.has(tag.object)) queue.push(tag.object);
-        continue;
+  commitDistances(repo: Repo, roots: Iterable<string>, maxDist: number = Number.POSITIVE_INFINITY): Map<string, number> {
+    const run = (limit: number): { dist: Map<string, number>; sawMerge: boolean } => {
+      const dist = new Map<string, number>();
+      const queue: string[] = [];
+      let sawMerge = false;
+      for (const root of roots) {
+        if (!G.isOid(root) || dist.has(root)) continue;
+        const object = repo.objects.get(root);
+        if (object === undefined) continue;
+        if (object.type === 'tag') {
+          const tag = G.parseTag(object.data);
+          if (!dist.has(tag.object)) queue.push(tag.object);
+          continue;
+        }
+        if (object.type !== 'commit') continue;
+        dist.set(root, 0);
+        queue.push(root);
       }
-      if (object.type !== 'commit') continue;
-      dist.set(root, 0);
-      queue.push(root);
-    }
-    while (queue.length > 0) {
-      const oid = queue.pop()!;
-      const current = dist.get(oid)!;
-      const info = this.commitInfo(repo, oid);
-      if (info === null) continue;
-      for (const parent of info.parents) {
-        if (!dist.has(parent) && repo.objects.has(parent)) {
-          dist.set(parent, current + 1);
-          queue.push(parent);
+      while (queue.length > 0) {
+        const oid = queue.pop()!;
+        const current = dist.get(oid)!;
+        if (current >= limit) continue;
+        const info = this.commitInfo(repo, oid);
+        if (info === null) continue;
+        if (info.parents.length > 1) sawMerge = true;
+        for (const parent of info.parents) {
+          if (!dist.has(parent) && repo.objects.has(parent)) {
+            dist.set(parent, current + 1);
+            queue.push(parent);
+          }
         }
       }
-    }
-    return dist;
+      return { dist, sawMerge };
+    };
+    const bounded = run(maxDist);
+    if (maxDist === Number.POSITIVE_INFINITY || !bounded.sawMerge) return bounded.dist;
+    return run(Number.POSITIVE_INFINITY).dist;
   }
 
   /** True when `ancestor` is an ancestor of `descendant` (or the same commit). */

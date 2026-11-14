@@ -173,7 +173,10 @@ export function planFetch(store: Store, repo: Repo, args: FetchArgs): FetchPlan 
   const haveReach = haves.length > 0 ? store.reachable(repo, haves, Number.POSITIVE_INFINITY, cut) : new Set<string>();
   const send = [...wantReach].filter((oid) => !haveReach.has(oid)).sort();
   // The shallow boundary: included commits whose parents fall outside the cut.
-  const distances = depth === Number.POSITIVE_INFINITY ? null : store.commitDistances(repo, wants);
+  // Only distances up to depth-1 are ever read, so the walk is capped there
+  // instead of traversing the whole history (a depth-1 fetch only needs the
+  // wants themselves).
+  const distances = depth === Number.POSITIVE_INFINITY ? null : store.commitDistances(repo, wants, depth - 1);
   const shallow: string[] = [];
   const unshallow: string[] = [];
   if (distances !== null) {
@@ -199,14 +202,19 @@ export function planFetch(store: Store, repo: Repo, args: FetchArgs): FetchPlan 
     unshallow.sort();
   }
   // Negotiation: an ACK names the first have that is an ancestor of a want.
+  // The closure is only needed when the client actually sent haves; a fresh
+  // clone sends none, and walking the whole history for an empty loop is pure
+  // waste (reachable() also visits every tree and blob, not just commits).
   let ack = 'NAK';
   let acked = false;
-  const wantClosure = store.reachable(repo, wants);
-  for (const have of haves) {
-    if (wantClosure.has(have)) {
-      ack = `ACK ${have}`;
-      acked = true;
-      break;
+  if (haves.length > 0) {
+    const wantClosure = store.reachable(repo, wants);
+    for (const have of haves) {
+      if (wantClosure.has(have)) {
+        ack = `ACK ${have}`;
+        acked = true;
+        break;
+      }
     }
   }
   return { send, shallow, unshallow, ack, acked };
